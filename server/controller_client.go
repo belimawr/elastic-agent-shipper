@@ -13,6 +13,7 @@ import (
 	"github.com/elastic/elastic-agent-client/v7/pkg/client"
 	"github.com/elastic/elastic-agent-libs/logp"
 	"github.com/elastic/elastic-agent-shipper/config"
+	"github.com/elastic/elastic-agent-shipper/queue"
 )
 
 type doneChan chan struct{}
@@ -78,14 +79,34 @@ func (c *clientHandler) stopShipper() {
 // initialize the startup of the shipper grpc server and backend
 func (c *clientHandler) startShipper(unit *client.Unit) {
 	c.log.Debugf("Starting Shipper")
+	// Early call to c.Run so we avoid all config parsing/error handling
+	// because we've hardcoded it
+	// We also make sure the logger is on debug mode no matter what.
+	logConfig := logp.DefaultConfig(logp.DefaultEnvironment)
+	logConfig.Beat = "agent-shipper"
+	logConfig.ToStderr = true
+	logConfig.ToFiles = false
+
+	hackCfg := config.ShipperConfig{
+		Log:   logConfig,
+		TLS:   false,
+		Port:  50051,
+		Queue: queue.DefaultConfig(),
+	}
+	c.Run(hackCfg, unit)
 	atomic.CompareAndSwapUint32(&c.shipperIsStopping, 1, 0)
 
 	// deciding to omit some of these error checks, as the client update state will only return an error if it has a JSON payload to unmarshall
 	_ = unit.UpdateState(client.UnitStateConfiguring, "reading shipper config", nil)
 
 	// Assuming that if we got here from UnitChangedAdded, we don't need to care about the expected state?
-	_, configString := unit.Expected()
-	cfg, err := config.ReadConfigFromJSON(configString)
+	// The code would not compile (incompatible versions, so I hacked it)
+	_, _, configString := unit.Expected()
+	data, err := configString.GetSource().MarshalJSON()
+	if err != nil {
+		c.log.Fatalf("converting config to string: %s", err)
+	}
+	cfg, err := config.ReadConfigFromJSON(string(data))
 	if err != nil {
 		c.log.Errorf("error unpacking config from agent: %s", err)
 		_ = unit.UpdateState(client.UnitStateFailed, err.Error(), nil)
@@ -129,8 +150,10 @@ func (c *clientHandler) updateStream(unit *client.Unit) {
 
 // handle the UnitChangedAdded event from the V2 API
 func (c *clientHandler) handleUnitAdded(unit *client.Unit) {
-	c.addUnit(unit)
-	unitType := unit.Type()
+	unit = &client.Unit{}
+	fmt.Println(">> handleUnitAdded")
+	// c.addUnit(unit)
+	unitType := client.UnitTypeOutput //unit.Type()
 
 	if unitType == client.UnitTypeOutput { // unit startup for the shipper itself
 		c.setShipperUnitID(unit)
@@ -147,7 +170,8 @@ func (c *clientHandler) handleUnitUpdated(unit *client.Unit) {
 	unitType := unit.Type()
 
 	if unitType == client.UnitTypeOutput {
-		state, _ := unit.Expected()
+		// Another verion hack
+		state, _, _ := unit.Expected()
 		if state == client.UnitStateStopped {
 			c.shutdown(unit)
 		}
@@ -173,20 +197,33 @@ func (c *clientHandler) shutdown(shipperUnit *client.Unit) {
 
 // runController is the main runloop for the shipper itself, and managed communication with the agent.
 func runController(ctx context.Context, agentClient client.V2) error {
+	// Initialise the logger as early as possible
+	logConfig := logp.DefaultConfig(logp.DefaultEnvironment)
+	logConfig.Beat = "agent-shipper"
+	logConfig.Level = logp.DebugLevel
+	logConfig.ToStderr = true
+	logConfig.ToFiles = false
+
+	logp.Configure(logConfig)
+
 	log := logp.L()
 
-	err := agentClient.Start(ctx)
-	if err != nil {
-		return fmt.Errorf("error starting connection to client")
-	}
+	// err := agentClient.Start(ctx)
+	// if err != nil {
+	// 	fmt.Printf("error starting connection to client")
+	// }
 
 	log.Debugf("Starting error reporter")
-	go reportErrors(ctx, agentClient)
+	// go reportErrors(ctx, agentClient)
 
 	log.Debugf("Started client, waiting")
 
 	handler := newClientHandler()
-
+	handler.handleUnitAdded(nil)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	// Block here so we won't panic on that for/select
+	wg.Wait()
 	// receive the units
 	for {
 		select {

@@ -30,7 +30,8 @@ import (
 func LoadAndRun() error {
 	agentClient, _, err := client.NewV2FromReader(os.Stdin, client.VersionInfo{Name: "elastic-agent-shipper", Version: "v2"})
 	if err != nil {
-		return fmt.Errorf("error reading control config from agent: %w", err)
+		// Ignore the error, we won't use this agentClient.
+		fmt.Printf("IGNORING: error reading control config from agent: %s", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -83,7 +84,8 @@ func (c *clientHandler) Run(cfg config.ShipperConfig, unit *client.Unit) error {
 	out := output.NewConsole(queue)
 	out.Start()
 
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", cfg.Port))
+	addr := fmt.Sprintf("localhost:%d", cfg.Port)
+	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
@@ -93,7 +95,7 @@ func (c *clientHandler) Run(cfg config.ShipperConfig, unit *client.Unit) error {
 		return fmt.Errorf("error loading outputs: %w", err)
 	}
 
-	_ = unit.UpdateState(client.UnitStateConfiguring, "starting shipper server", nil)
+	// _ = unit.UpdateState(client.UnitStateConfiguring, "starting shipper server", nil)
 
 	var opts []grpc.ServerOption
 	if cfg.TLS {
@@ -121,8 +123,8 @@ func (c *clientHandler) Run(cfg config.ShipperConfig, unit *client.Unit) error {
 		shipperServer.Close()
 	}
 	handleShutdown(shutdownFunc, c.shutdownInit)
-	log.Debugf("gRPC server is listening on port %d", cfg.Port)
-	_ = unit.UpdateState(client.UnitStateHealthy, "Shipper Running", nil)
+	log.Debugf("gRPC server is listening on '%s'", addr)
+	// _ = unit.UpdateState(client.UnitStateHealthy, "Shipper Running", nil)
 
 	// This will get sent after the server has shutdown, signaling to the runloop that it can stop.
 	// The shipper has no queues connected right now, but once it does, this function can't run until
@@ -133,6 +135,7 @@ func (c *clientHandler) Run(cfg config.ShipperConfig, unit *client.Unit) error {
 		c.shutdownComplete.Done()
 	}()
 	c.shutdownComplete.Add(1)
+	fmt.Printf(">>>> Starting grpc server on: '%s'\n\n", addr)
 	return grpcServer.Serve(lis)
 
 }
